@@ -1,4 +1,4 @@
-name: Build APK from ZIP
+name: Build Blackbox APK from ZIP
 
 on:
   workflow_dispatch:
@@ -15,97 +15,204 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract project ZIP
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Do NOT use android-actions/setup-android here.
+      # GitHub's Ubuntu runner already contains the Android SDK.
+      # We use its sdkmanager directly because setup-android was the
+      # step failing in the previous workflow.
+      - name: Configure Android SDK
         shell: bash
         run: |
-          set -e
-          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+          set -euxo pipefail
+
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found under $ANDROID_HOME/cmdline-tools"
+            find "$ANDROID_HOME" -maxdepth 4 -type f -name sdkmanager -print || true
+            exit 1
+          fi
+
+          SDK_DIR="$(dirname "$(dirname "$SDKMANAGER")")"
+          echo "SDKMANAGER=$SDKMANAGER"
+          echo "SDK_DIR=$SDK_DIR"
+
+          echo "$SDK_DIR/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/build-tools/35.0.0" >> "$GITHUB_PATH"
+
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;25.2.9519653" \
+            "cmake;3.22.1"
+
+      - name: Extract project ZIP into workspace root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' -print -quit)"
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: No ZIP file found in repository root."
             exit 1
           fi
 
-          echo "Using: $ZIP_FILE"
+          echo "Using ZIP: $ZIP_FILE"
 
-          mkdir -p _project
-          unzip -q "$ZIP_FILE" -d _project
+          rm -rf _project
+          mkdir _project
+          unzip -q -o "$ZIP_FILE" -d _project
 
-          # Find the actual project root inside the archive.
+          # Locate the actual Android project by its settings.gradle.
           PROJECT_ROOT="$(
-            find _project -maxdepth 4 \
+            find _project -type f \
               \( -name settings.gradle -o -name settings.gradle.kts \) \
-              -type f -print -quit \
+              -print -quit \
               | xargs -r dirname
           )"
 
           if [ -z "$PROJECT_ROOT" ]; then
-            echo "ERROR: Could not find settings.gradle/settings.gradle.kts in ZIP."
-            echo "ZIP contents:"
-            find _project -maxdepth 3 -type f | sort | head -200
+            echo "ERROR: settings.gradle was not found inside the ZIP."
+            echo "Archive contents:"
+            find _project -maxdepth 4 -type f | sort | head -300
             exit 1
           fi
 
-          echo "Project root: $PROJECT_ROOT"
+          echo "Project root inside ZIP: $PROJECT_ROOT"
 
-          # Move project files to GitHub workspace root.
-          shopt -s dotglob
-          cp -a "$PROJECT_ROOT"/. ./ 
-          shopt -u dotglob
+          # Copy hidden files too.
+          cp -a "$PROJECT_ROOT"/. ./
 
-          echo "Project extracted successfully."
+          rm -rf _project
+
+          # Never reuse native build caches from a previous machine.
+          rm -rf app/.cxx wear/.cxx llm/.cxx .gradle
+
+          # Tell Gradle exactly which Android SDK/NDK to use.
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          printf 'ndk.dir=%s/ndk/25.2.9519653\n' "$ANDROID_HOME" >> local.properties
+
+          echo "===== PROJECT ROOT ====="
           ls -la
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
+          echo "===== GRADLE SETTINGS ====="
+          cat settings.gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
+          gradle-version: "8.7"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      - name: Download llama.cpp if needed
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "cmake;3.22.1" \
-            "ndk;27.2.12479018"
+          set -euo pipefail
 
-      - name: Make Gradle executable
-        shell: bash
-        run: |
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-          else
-            echo "ERROR: gradlew not found in extracted project."
-            exit 1
+          LLAMA_DIR="app/src/main/cpp/third_party/llama.cpp"
+
+          if [ ! -f "$LLAMA_DIR/CMakeLists.txt" ]; then
+            echo "llama.cpp is not included in the ZIP; downloading a known revision."
+            rm -rf "$LLAMA_DIR"
+            git clone --depth 1 --branch b3403 \
+              https://github.com/ggml-org/llama.cpp.git \
+              "$LLAMA_DIR"
           fi
 
-      - name: Build debug APK
-        shell: bash
-        run: |
-          ./gradlew --no-daemon --stacktrace assembleDebug
-
-      - name: Collect APK
-        shell: bash
-        run: |
-          mkdir -p artifacts
-          find . -type f -name "*.apk" -print -exec cp {} artifacts/ \;
-          if [ -z "$(find artifacts -type f -name '*.apk' -print -quit)" ]; then
-            echo "ERROR: APK was not produced."
-            exit 1
+          # Compatibility workaround used by this project.
+          if [ -f "$LLAMA_DIR/CMakeLists.txt" ]; then
+            sed -i \
+              's|get_directory_property(GGML_DIR_DEFINES DIRECTORY ggml/src COMPILE_DEFINITIONS)|set(GGML_DIR_DEFINES "")|' \
+              "$LLAMA_DIR/CMakeLists.txt" || true
           fi
-          ls -lh artifacts/
 
-      - name: Upload APK
+      - name: Build phone and watch APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gradle \
+            :app:assembleRelease \
+            :wear:assembleRelease \
+            --no-daemon \
+            --stacktrace
+
+      - name: Sign APKs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p output_apks
+
+          # Use the keystore included in the project ZIP when available.
+          # Otherwise generate a temporary release keystore.
+          if [ ! -f blackbox_shared.jks ]; then
+            keytool -genkeypair \
+              -keystore blackbox_shared.jks \
+              -storepass blackbox2026 \
+              -keypass blackbox2026 \
+              -alias blackbox \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Blackbox Offline, O=Blackbox, C=US"
+          fi
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+
+          "$ZIPALIGN" -f -p 4 \
+            app/build/outputs/apk/release/app-release-unsigned.apk \
+            phone-aligned.apk
+
+          "$APKSIGNER" sign \
+            --ks blackbox_shared.jks \
+            --ks-key-alias blackbox \
+            --ks-pass pass:blackbox2026 \
+            --key-pass pass:blackbox2026 \
+            --out output_apks/BlackboxPhone.apk \
+            phone-aligned.apk
+
+          if [ -f wear/build/outputs/apk/release/wear-release-unsigned.apk ]; then
+            "$ZIPALIGN" -f -p 4 \
+              wear/build/outputs/apk/release/wear-release-unsigned.apk \
+              wear-aligned.apk
+
+            "$APKSIGNER" sign \
+              --ks blackbox_shared.jks \
+              --ks-key-alias blackbox \
+              --ks-pass pass:blackbox2026 \
+              --key-pass pass:blackbox2026 \
+              --out output_apks/BlackboxWatch.apk \
+              wear-aligned.apk
+          fi
+
+          "$APKSIGNER" verify --verbose output_apks/BlackboxPhone.apk
+
+          if [ -f output_apks/BlackboxWatch.apk ]; then
+            "$APKSIGNER" verify --verbose output_apks/BlackboxWatch.apk
+          fi
+
+          ls -lh output_apks/
+
+      - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Blackbox-APK
-          path: artifacts/*.apk
+          name: Blackbox-Realtime-APKs
+          path: output_apks/*.apk
           if-no-files-found: error
