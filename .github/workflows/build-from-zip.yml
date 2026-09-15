@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'BlackboxOffline_REALTIME_FINAL.zip'
+      - 'BlackboxOffline_REALTIME_FINAL_v3.zip'
       - '.github/workflows/build-from-zip.yml'
 
 jobs:
@@ -29,21 +29,10 @@ jobs:
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
-
           SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager -print -quit)"
-          if [ -z "$SDKMANAGER" ]; then
-            echo 'ERROR: sdkmanager was not found.'
-            find "$ANDROID_HOME" -type f -name sdkmanager -print || true
-            exit 1
-          fi
-
+          test -n "$SDKMANAGER"
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" \
-            'platform-tools' \
-            'platforms;android-35' \
-            'build-tools;35.0.0' \
-            'ndk;25.2.9519653' \
-            'cmake;3.22.1'
+          "$SDKMANAGER" 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;25.2.9519653' 'cmake;3.22.1'
 
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
@@ -54,88 +43,62 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          ZIP_NAME='BlackboxOffline_REALTIME_FINAL.zip'
-          if [ ! -f "$ZIP_NAME" ]; then
-            echo "ERROR: $ZIP_NAME is missing from repository root."
-            find . -maxdepth 1 -type f -printf '%f\n' | sort
-            exit 1
-          fi
-
+          ZIP_NAME='BlackboxOffline_REALTIME_FINAL_v3.zip'
+          test -f "$ZIP_NAME"
           rm -rf _project
           mkdir -p _project
           unzip -q -o "$ZIP_NAME" -d _project
-
-          PROJECT_ROOT="$(find _project -type f \
-            \( -name settings.gradle -o -name settings.gradle.kts \) \
-            -print -quit | xargs -r dirname)"
-
-          if [ -z "$PROJECT_ROOT" ]; then
-            echo 'ERROR: Android project root was not found in ZIP.'
-            find _project -maxdepth 4 -type f | sort | head -300
-            exit 1
-          fi
-
+          PROJECT_ROOT="$(find _project -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit | xargs -r dirname)"
+          test -n "$PROJECT_ROOT"
           cp -a "$PROJECT_ROOT"/. ./
           rm -rf _project
-
           find app wear llm -type f -exec touch {} + 2>/dev/null || true
           rm -rf app/.cxx wear/.cxx llm/.cxx .gradle
-
           printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
           printf 'ndk.dir=%s/ndk/25.2.9519653\n' "$ANDROID_HOME" >> local.properties
 
-          ls -la
-          cat settings.gradle
-
-      - name: Verify realtime Java/JNI bridge before Gradle build
+      - name: Verify realtime bridge and Android ARM CMake settings
         shell: bash
         run: |
           set -euo pipefail
-
           test -f app/src/main/java/com/blackbox/offline/RealtimeTranscriber.java
           test -f app/src/main/java/com/blackbox/offline/LocalAiEngine.java
           test -f app/src/main/cpp/blackbox_ai.cpp
-
-          grep -q 'public String transcribeRealtimePcm(float\[\] pcm)' \
-            app/src/main/java/com/blackbox/offline/LocalAiEngine.java
-          grep -q 'nativeTranscribeRealtimePcm' \
-            app/src/main/java/com/blackbox/offline/LocalAiEngine.java
-          grep -q 'Java_com_blackbox_offline_LocalAiEngine_nativeTranscribeRealtimePcm' \
-            app/src/main/cpp/blackbox_ai.cpp
-
-          echo 'Realtime Java/JNI bridge: OK'
+          test -f app/build.gradle
+          test -f app/src/main/cpp/third_party/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt
+          grep -q 'public String transcribeRealtimePcm(float\[\] pcm)' app/src/main/java/com/blackbox/offline/LocalAiEngine.java
+          grep -q 'nativeTranscribeRealtimePcm' app/src/main/java/com/blackbox/offline/LocalAiEngine.java
+          grep -q 'Java_com_blackbox_offline_LocalAiEngine_nativeTranscribeRealtimePcm' app/src/main/cpp/blackbox_ai.cpp
+          grep -q 'set(GGML_NATIVE OFF CACHE BOOL "" FORCE)' app/src/main/cpp/CMakeLists.txt
+          grep -q 'set(GGML_CPU_ARM_ARCH "armv8-a" CACHE STRING "" FORCE)' app/src/main/cpp/CMakeLists.txt
+          grep -q "arguments '-DGGML_NATIVE=OFF', '-DWHISPER_NATIVE=OFF', '-DGGML_CPU_ARM_ARCH=armv8-a', '-DGGML_CPU_ALL_VARIANTS=OFF'" app/build.gradle
+          grep -q 'if (GGML_NATIVE AND NOT ANDROID)' app/src/main/cpp/third_party/whisper.cpp/ggml/src/ggml-cpu/CMakeLists.txt
+          echo 'Realtime bridge and Android ARM cross-compile settings: OK'
+          echo 'No-native ARM ggml guard: OK'
 
       - name: Fetch pinned llama.cpp b3403
         shell: bash
         run: |
           set -euo pipefail
-
           LLAMA_DIR='app/src/main/cpp/third_party/llama.cpp'
           if [ ! -f "$LLAMA_DIR/CMakeLists.txt" ]; then
             rm -rf "$LLAMA_DIR"
-            git clone --depth 1 --branch b3403 \
-              https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
+            git clone --depth 1 --branch b3403 https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
           fi
-
           test -f "$LLAMA_DIR/CMakeLists.txt"
           test -f "$LLAMA_DIR/include/llama.h"
-          echo 'llama.cpp b3403 is present.'
 
       - name: Compile Java first
         shell: bash
         run: |
           set -euo pipefail
-          gradle :app:compileReleaseJavaWithJavac \
-                 :wear:compileReleaseJavaWithJavac \
-                 --no-daemon --stacktrace
+          gradle :app:compileReleaseJavaWithJavac :wear:compileReleaseJavaWithJavac --no-daemon --stacktrace
 
       - name: Build Phone and Galaxy Watch release APKs
         shell: bash
         run: |
           set -euo pipefail
-          gradle :app:assembleRelease :wear:assembleRelease \
-            --no-daemon --stacktrace
+          gradle :app:assembleRelease :wear:assembleRelease --no-daemon --stacktrace
 
       - name: Restore persistent signing key
         shell: bash
@@ -146,32 +109,15 @@ jobs:
           BLACKBOX_KEY_PASSWORD: ${{ secrets.BLACKBOX_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
-          for name in \
-            BLACKBOX_KEYSTORE_BASE64 \
-            BLACKBOX_KEYSTORE_PASSWORD \
-            BLACKBOX_KEY_ALIAS \
-            BLACKBOX_KEY_PASSWORD
-          do
+          for name in BLACKBOX_KEYSTORE_BASE64 BLACKBOX_KEYSTORE_PASSWORD BLACKBOX_KEY_ALIAS BLACKBOX_KEY_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               echo "ERROR: GitHub Secret $name is not configured."
               exit 1
             fi
           done
-
           printf '%s' "$BLACKBOX_KEYSTORE_BASE64" | base64 --decode > blackbox_release.jks
-
-          if [ ! -s blackbox_release.jks ]; then
-            echo 'ERROR: decoded keystore is empty.'
-            exit 1
-          fi
-
-          keytool -list \
-            -keystore blackbox_release.jks \
-            -storepass "$BLACKBOX_KEYSTORE_PASSWORD" \
-            -alias "$BLACKBOX_KEY_ALIAS" \
-            >/dev/null
-
+          test -s blackbox_release.jks
+          keytool -list -keystore blackbox_release.jks -storepass "$BLACKBOX_KEYSTORE_PASSWORD" -alias "$BLACKBOX_KEY_ALIAS" >/dev/null
           echo 'Persistent signing key: OK'
 
       - name: Sign Phone and Watch APKs
@@ -182,42 +128,16 @@ jobs:
           BLACKBOX_KEY_PASSWORD: ${{ secrets.BLACKBOX_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
           mkdir -p output_apks
-
-          "$BUILD_TOOLS/zipalign" -f -p 4 \
-            app/build/outputs/apk/release/app-release-unsigned.apk \
-            phone-aligned.apk
-
-          "$BUILD_TOOLS/apksigner" sign \
-            --ks blackbox_release.jks \
-            --ks-key-alias "$BLACKBOX_KEY_ALIAS" \
-            --ks-pass env:BLACKBOX_KEYSTORE_PASSWORD \
-            --key-pass env:BLACKBOX_KEY_PASSWORD \
-            --out output_apks/BlackboxPhone.apk \
-            phone-aligned.apk
-
+          "$BUILD_TOOLS/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk phone-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign --ks blackbox_release.jks --ks-key-alias "$BLACKBOX_KEY_ALIAS" --ks-pass env:BLACKBOX_KEYSTORE_PASSWORD --key-pass env:BLACKBOX_KEY_PASSWORD --out output_apks/BlackboxPhone.apk phone-aligned.apk
           if [ -f wear/build/outputs/apk/release/wear-release-unsigned.apk ]; then
-            "$BUILD_TOOLS/zipalign" -f -p 4 \
-              wear/build/outputs/apk/release/wear-release-unsigned.apk \
-              watch-aligned.apk
-
-            "$BUILD_TOOLS/apksigner" sign \
-              --ks blackbox_release.jks \
-              --ks-key-alias "$BLACKBOX_KEY_ALIAS" \
-              --ks-pass env:BLACKBOX_KEYSTORE_PASSWORD \
-              --key-pass env:BLACKBOX_KEY_PASSWORD \
-              --out output_apks/BlackboxWatch.apk \
-              watch-aligned.apk
+            "$BUILD_TOOLS/zipalign" -f -p 4 wear/build/outputs/apk/release/wear-release-unsigned.apk watch-aligned.apk
+            "$BUILD_TOOLS/apksigner" sign --ks blackbox_release.jks --ks-key-alias "$BLACKBOX_KEY_ALIAS" --ks-pass env:BLACKBOX_KEYSTORE_PASSWORD --key-pass env:BLACKBOX_KEY_PASSWORD --out output_apks/BlackboxWatch.apk watch-aligned.apk
           fi
-
           "$BUILD_TOOLS/apksigner" verify --verbose output_apks/BlackboxPhone.apk
-
-          if [ -f output_apks/BlackboxWatch.apk ]; then
-            "$BUILD_TOOLS/apksigner" verify --verbose output_apks/BlackboxWatch.apk
-          fi
-
+          if [ -f output_apks/BlackboxWatch.apk ]; then "$BUILD_TOOLS/apksigner" verify --verbose output_apks/BlackboxWatch.apk; fi
           ls -lh output_apks/
 
       - name: Upload APK artifacts
@@ -230,5 +150,4 @@ jobs:
       - name: Cleanup signing material
         if: always()
         shell: bash
-        run: |
-          rm -f blackbox_release.jks phone-aligned.apk watch-aligned.apk
+        run: rm -f blackbox_release.jks phone-aligned.apk watch-aligned.apk
