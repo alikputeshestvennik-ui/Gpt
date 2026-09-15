@@ -5,7 +5,7 @@ on:
   push:
     paths:
       - "BlackboxOffline_REALTIME_FINAL_V6.zip"
-      - ".github/workflows/build-from-zip-v6-one-secret.yml"
+      - ".github/workflows/build-from-zip-v6-one-secret-fixed.yml"
 
 jobs:
   build:
@@ -21,7 +21,6 @@ jobs:
           set -euo pipefail
           test -f "BlackboxOffline_REALTIME_FINAL_V6.zip"
           unzip -t "BlackboxOffline_REALTIME_FINAL_V6.zip" >/dev/null
-          echo "ZIP OK"
 
       - name: Unpack project
         shell: bash
@@ -41,20 +40,33 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Set up Android SDK command-line tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ""
 
-      - name: Install Android SDK components
+      - name: Install required Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager \
+          sdkmanager --sdk_root="${ANDROID_SDK_ROOT}" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0" \
             "ndk;25.2.9519653" \
             "cmake;3.22.1"
+
+      - name: Verify Android toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
+          sdkmanager --version
+          test -d "${ANDROID_SDK_ROOT}/platforms/android-35"
+          test -d "${ANDROID_SDK_ROOT}/build-tools/35.0.0"
+          test -d "${ANDROID_SDK_ROOT}/ndk/25.2.9519653"
+          test -d "${ANDROID_SDK_ROOT}/cmake/3.22.1"
 
       - name: Set up Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
@@ -66,9 +78,7 @@ jobs:
         working-directory: project
         run: |
           set -euo pipefail
-          if [ ! -d llama.cpp ]; then
-            git clone --depth 1 --branch b3403 https://github.com/ggerganov/llama.cpp.git llama.cpp
-          fi
+          git clone --depth 1 --branch b3403 https://github.com/ggerganov/llama.cpp.git llama.cpp
           test -f llama.cpp/CMakeLists.txt
 
       - name: Verify realtime Whisper bridge and native build flags
@@ -121,13 +131,11 @@ jobs:
           BLACKBOX: ${{ secrets.BLACKBOX }}
         run: |
           set -euo pipefail
-
           APKSIGNER="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
           test -x "$APKSIGNER"
 
           PHONE_IN="$(find app/build/outputs/apk/release -maxdepth 1 -name '*-release.apk' | head -n 1)"
           WATCH_IN="$(find wear/build/outputs/apk/release -maxdepth 1 -name '*-release.apk' | head -n 1)"
-
           test -n "$PHONE_IN"
           test -n "$WATCH_IN"
 
@@ -161,5 +169,4 @@ jobs:
       - name: Cleanup signing material
         if: always()
         shell: bash
-        run: |
-          rm -f blackbox_release.jks
+        run: rm -f blackbox_release.jks
