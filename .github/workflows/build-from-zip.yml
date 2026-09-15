@@ -1,1 +1,111 @@
-uhhh
+name: Build APK from ZIP
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "*.zip"
+      - ".github/workflows/build-from-zip.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract project ZIP
+        shell: bash
+        run: |
+          set -e
+          ZIP_FILE="$(find . -maxdepth 1 -type f -iname '*.zip' | head -n 1)"
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: No ZIP file found in repository root."
+            exit 1
+          fi
+
+          echo "Using: $ZIP_FILE"
+
+          mkdir -p _project
+          unzip -q "$ZIP_FILE" -d _project
+
+          # Find the actual project root inside the archive.
+          PROJECT_ROOT="$(
+            find _project -maxdepth 4 \
+              \( -name settings.gradle -o -name settings.gradle.kts \) \
+              -type f -print -quit \
+              | xargs -r dirname
+          )"
+
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "ERROR: Could not find settings.gradle/settings.gradle.kts in ZIP."
+            echo "ZIP contents:"
+            find _project -maxdepth 3 -type f | sort | head -200
+            exit 1
+          fi
+
+          echo "Project root: $PROJECT_ROOT"
+
+          # Move project files to GitHub workspace root.
+          shopt -s dotglob
+          cp -a "$PROJECT_ROOT"/. ./ 
+          shopt -u dotglob
+
+          echo "Project extracted successfully."
+          ls -la
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.2.12479018"
+
+      - name: Make Gradle executable
+        shell: bash
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+          else
+            echo "ERROR: gradlew not found in extracted project."
+            exit 1
+          fi
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          ./gradlew --no-daemon --stacktrace assembleDebug
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          find . -type f -name "*.apk" -print -exec cp {} artifacts/ \;
+          if [ -z "$(find artifacts -type f -name '*.apk' -print -quit)" ]; then
+            echo "ERROR: APK was not produced."
+            exit 1
+          fi
+          ls -lh artifacts/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Blackbox-APK
+          path: artifacts/*.apk
+          if-no-files-found: error
