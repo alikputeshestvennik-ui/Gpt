@@ -100,44 +100,68 @@ jobs:
           set -euo pipefail
           gradle :app:assembleRelease :wear:assembleRelease --no-daemon --stacktrace
 
-      - name: Restore persistent signing key
+      - name: Create CI signing key
         shell: bash
         env:
-          BLACKBOX_KEYSTORE_BASE64: ${{ secrets.BLACKBOX_KEYSTORE_BASE64 }}
-          BLACKBOX_KEYSTORE_PASSWORD: ${{ secrets.BLACKBOX_KEYSTORE_PASSWORD }}
-          BLACKBOX_KEY_ALIAS: ${{ secrets.BLACKBOX_KEY_ALIAS }}
-          BLACKBOX_KEY_PASSWORD: ${{ secrets.BLACKBOX_KEY_PASSWORD }}
+          BLACKBOX_PASSWORD: ${{ secrets.BLACKBOX }}
         run: |
           set -euo pipefail
-          for name in BLACKBOX_KEYSTORE_BASE64 BLACKBOX_KEYSTORE_PASSWORD BLACKBOX_KEY_ALIAS BLACKBOX_KEY_PASSWORD; do
-            if [ -z "${!name:-}" ]; then
-              echo "ERROR: GitHub Secret $name is not configured."
-              exit 1
-            fi
-          done
-          printf '%s' "$BLACKBOX_KEYSTORE_BASE64" | base64 --decode > blackbox_release.jks
-          test -s blackbox_release.jks
-          keytool -list -keystore blackbox_release.jks -storepass "$BLACKBOX_KEYSTORE_PASSWORD" -alias "$BLACKBOX_KEY_ALIAS" >/dev/null
-          echo 'Persistent signing key: OK'
+          if [ -z "${BLACKBOX_PASSWORD:-}" ]; then
+            echo 'ERROR: GitHub Repository Secret BLACKBOX is missing.'
+            echo 'Create one secret named BLACKBOX and put your private signing password in it.'
+            exit 1
+          fi
+          keytool -genkeypair \
+            -keystore blackbox_release.jks \
+            -storepass:env BLACKBOX_PASSWORD \
+            -keypass:env BLACKBOX_PASSWORD \
+            -alias blackbox \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname 'CN=Blackbox Offline, O=Blackbox, C=US' \
+            >/dev/null 2>&1
+          keytool -list \
+            -keystore blackbox_release.jks \
+            -storepass:env BLACKBOX_PASSWORD \
+            -alias blackbox \
+            >/dev/null
+          echo 'CI signing key: OK'
 
       - name: Sign Phone and Watch APKs
         shell: bash
         env:
-          BLACKBOX_KEYSTORE_PASSWORD: ${{ secrets.BLACKBOX_KEYSTORE_PASSWORD }}
-          BLACKBOX_KEY_ALIAS: ${{ secrets.BLACKBOX_KEY_ALIAS }}
-          BLACKBOX_KEY_PASSWORD: ${{ secrets.BLACKBOX_KEY_PASSWORD }}
+          BLACKBOX_PASSWORD: ${{ secrets.BLACKBOX }}
         run: |
           set -euo pipefail
+          if [ -z "${BLACKBOX_PASSWORD:-}" ]; then
+            echo 'ERROR: GitHub Repository Secret BLACKBOX is missing.'
+            exit 1
+          fi
           BUILD_TOOLS="$ANDROID_HOME/build-tools/35.0.0"
           mkdir -p output_apks
           "$BUILD_TOOLS/zipalign" -f -p 4 app/build/outputs/apk/release/app-release-unsigned.apk phone-aligned.apk
-          "$BUILD_TOOLS/apksigner" sign --ks blackbox_release.jks --ks-key-alias "$BLACKBOX_KEY_ALIAS" --ks-pass env:BLACKBOX_KEYSTORE_PASSWORD --key-pass env:BLACKBOX_KEY_PASSWORD --out output_apks/BlackboxPhone.apk phone-aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks blackbox_release.jks \
+            --ks-key-alias blackbox \
+            --ks-pass env:BLACKBOX_PASSWORD \
+            --key-pass env:BLACKBOX_PASSWORD \
+            --out output_apks/BlackboxPhone.apk \
+            phone-aligned.apk
           if [ -f wear/build/outputs/apk/release/wear-release-unsigned.apk ]; then
             "$BUILD_TOOLS/zipalign" -f -p 4 wear/build/outputs/apk/release/wear-release-unsigned.apk watch-aligned.apk
-            "$BUILD_TOOLS/apksigner" sign --ks blackbox_release.jks --ks-key-alias "$BLACKBOX_KEY_ALIAS" --ks-pass env:BLACKBOX_KEYSTORE_PASSWORD --key-pass env:BLACKBOX_KEY_PASSWORD --out output_apks/BlackboxWatch.apk watch-aligned.apk
+            "$BUILD_TOOLS/apksigner" sign \
+              --ks blackbox_release.jks \
+              --ks-key-alias blackbox \
+              --ks-pass env:BLACKBOX_PASSWORD \
+              --key-pass env:BLACKBOX_PASSWORD \
+              --out output_apks/BlackboxWatch.apk \
+              watch-aligned.apk
           fi
           "$BUILD_TOOLS/apksigner" verify --verbose output_apks/BlackboxPhone.apk
-          if [ -f output_apks/BlackboxWatch.apk ]; then "$BUILD_TOOLS/apksigner" verify --verbose output_apks/BlackboxWatch.apk; fi
+          if [ -f output_apks/BlackboxWatch.apk ]; then
+            "$BUILD_TOOLS/apksigner" verify --verbose output_apks/BlackboxWatch.apk
+          fi
           ls -lh output_apks/
 
       - name: Upload APK artifacts
