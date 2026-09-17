@@ -1,4 +1,4 @@
-name: Build Blackbox Ecosystem from ZIP (V11_VOSK_MEMORY)
+name: Build Blackbox Ecosystem from ZIP (LOCAL_GEMMA)
 
 on:
   workflow_dispatch:
@@ -79,8 +79,8 @@ jobs:
           cp -a "$PROJECT_ROOT"/. ./
           rm -rf _project
 
-          find app wear llm -type f -exec touch {} + 2>/dev/null || true
-          rm -rf app/.cxx wear/.cxx llm/.cxx .gradle
+          find app wear -type f -exec touch {} + 2>/dev/null || true
+          rm -rf app/.cxx wear/.cxx .gradle
 
           printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
           printf 'ndk.dir=%s/ndk/25.2.9519653\n' "$ANDROID_HOME" >> local.properties
@@ -95,29 +95,11 @@ jobs:
           test -f settings.gradle
           test -f app/build.gradle
           test -f wear/build.gradle
-          test -f llm/build.gradle
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/cpp/blackbox_ai.cpp
-          test -f app/src/main/java/com/blackbox/offline/LocalAiEngine.java
+          test -f app/src/main/java/com/blackbox/offline/GemmaEngine.java
           test -f app/src/main/java/com/blackbox/offline/RealtimeTranscriber.java
-          grep -q 'GGML_NATIVE OFF' app/src/main/cpp/CMakeLists.txt
-          echo 'Project structure OK (GGML_NATIVE=OFF is present)'
-
-      - name: Fetch pinned llama.cpp b3403
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          LLAMA_DIR='app/src/main/cpp/third_party/llama.cpp'
-          if [ ! -f "$LLAMA_DIR/CMakeLists.txt" ]; then
-            rm -rf "$LLAMA_DIR"
-            git clone --depth 1 --branch b3403 \
-              https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
-          fi
-
-          test -f "$LLAMA_DIR/CMakeLists.txt"
-          test -f "$LLAMA_DIR/include/llama.h"
-          echo 'llama.cpp b3403 is present.'
+          echo 'Project structure OK (LOCAL GEMMA)'
 
       - name: Compile Java first
         shell: bash
@@ -200,7 +182,7 @@ jobs:
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Blackbox-Realtime-Phone-and-Watch-V11_VOSK_MEMORY
+          name: Blackbox-Local-Gemma-Phone-and-Watch
           path: output_apks/*.apk
           if-no-files-found: error
 
