@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'BlackboxOffline_REALTIME_FINAL_V11_VOSK_MEMORY.zip'
+      - 'BlackboxOffline_FINAL_LOCAL_GEMMA_2.9.1.zip'
       - '.github/workflows/build-from-zip.yml'
 
 jobs:
@@ -55,7 +55,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_NAME='BlackboxOffline_REALTIME_FINAL_V11_VOSK_MEMORY.zip'
+          ZIP_NAME='BlackboxOffline_FINAL_LOCAL_GEMMA_2.9.1.zip'
           if [ ! -f "$ZIP_NAME" ]; then
             echo "ERROR: $ZIP_NAME is missing from repository root."
             find . -maxdepth 1 -type f -printf '%f\n' | sort
@@ -97,11 +97,32 @@ jobs:
           test -f wear/build.gradle
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/cpp/blackbox_ai.cpp
-          test -f app/src/main/java/com/blackbox/offline/GemmaEngine.java
+          test -f app/src/main/java/com/blackbox/offline/GemmaEngine.kt
           test -f app/src/main/java/com/blackbox/offline/RealtimeTranscriber.java
           echo 'Project structure OK (LOCAL GEMMA)'
 
-      - name: Compile Java first
+      - name: Print Gemma build diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Gemma source ==="
+          ls -lh app/src/main/java/com/blackbox/offline/GemmaEngine.kt
+          echo "=== LiteRT-LM dependency ==="
+          grep -n "litertlm" app/build.gradle
+          echo "=== Kotlin plugin ==="
+          grep -n "org.jetbrains.kotlin.android" app/build.gradle build.gradle
+          echo "=== Modules ==="
+          grep -n "include" settings.gradle
+
+      - name: Compile Kotlin first (Gemma)
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle :app:compileReleaseKotlin \
+                 :wear:compileReleaseKotlin \
+                 --no-daemon --stacktrace
+
+      - name: Compile Java
         shell: bash
         run: |
           set -euo pipefail
